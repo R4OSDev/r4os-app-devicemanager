@@ -126,82 +126,86 @@ const App = struct {
         self.refresh();
         self.render();
 
+        var events = r4os.EventLoop.init(self.ctx.sys, self.ctx.desk, &.{});
         while (!self.ctx.sys.programShouldClose()) {
-            var event: r4os.abi.GuiEvent = .{};
             var dirty = false;
-            while (self.ctx.desk.guiPollEvent(&event) > 0) {
-                const kind: r4os.abi.GuiEventKind = @enumFromInt(event.kind);
-                switch (kind) {
-                    .close => return 0,
-                    .resize => {
-                        _ = self.ctx.desk.guiWindowInfo(&info);
-                        self.updateMetrics(info);
-                        dirty = true;
-                    },
-                    .key_down => {
-                        const key: u8 = @intCast(event.key & 0xFF);
-                        if (key == r4os.gui.Key.escape) return 0;
-                        if (key == 'r' or key == 'R') {
-                            self.refresh();
+            switch (events.wait(r4os.time_contract.timeoutForever())) {
+                .message => |message| {
+                    const event = message.guiEvent() orelse continue;
+                    const kind: r4os.abi.GuiEventKind = @enumFromInt(event.kind);
+                    switch (kind) {
+                        .close => return 0,
+                        .resize => {
+                            _ = self.ctx.desk.guiWindowInfo(&info);
+                            self.updateMetrics(info);
                             dirty = true;
-                        } else if (key == 'e' or key == 'E') {
-                            _ = self.exportReport();
-                            dirty = true;
-                        } else if (key == 'a' or key == 'A') {
-                            self.setFilter(.all);
-                            dirty = true;
-                        } else if (key == 'n' or key == 'N') {
-                            self.setFilter(.network);
-                            dirty = true;
-                        } else if (key == 'd' or key == 'D') {
-                            self.setFilter(.driver);
-                            dirty = true;
-                        } else if (key == 'm' or key == 'M') {
-                            self.setFilter(.missing);
-                            dirty = true;
-                        } else if (key == 's' or key == 'S') {
-                            self.setFilter(.storage);
-                            dirty = true;
-                        } else if (key == 'p' or key == 'P') {
-                            self.setFilter(.protocol);
-                            dirty = true;
-                        } else if (self.handleListKey(key)) {
-                            dirty = true;
-                        } else if (key == '1') {
-                            self.network_tab = network_tab_adapter;
-                            dirty = true;
-                        } else if (key == '2') {
-                            self.network_tab = network_tab_protocols;
-                            dirty = true;
-                        } else if (key == '3') {
-                            self.network_tab = network_tab_tcp;
-                            dirty = true;
-                        } else if (self.handleNetworkTabKey(key)) {
-                            dirty = true;
-                        }
-                    },
-                    .mouse_down => {
-                        if (self.exportButtonHit(event.x, event.y)) {
-                            _ = self.exportReport();
-                            dirty = true;
-                        } else if (self.filterAt(event.x, event.y)) |filter| {
-                            self.setFilter(filter);
-                            dirty = true;
-                        } else if (self.networkTabAt(event.x, event.y)) |tab| {
-                            self.network_tab = tab;
-                            dirty = true;
-                        } else if (self.scrollListAt(event.x, event.y)) {
-                            dirty = true;
-                        } else if (self.indexAt(event.x, event.y)) |idx| {
-                            self.selected_index = idx;
-                            dirty = true;
-                        }
-                    },
-                    else => {},
-                }
+                        },
+                        .key_down => {
+                            const key: u8 = @intCast(event.key & 0xFF);
+                            if (key == r4os.gui.Key.escape) return 0;
+                            if (key == 'r' or key == 'R') {
+                                self.refresh();
+                                dirty = true;
+                            } else if (key == 'e' or key == 'E') {
+                                _ = self.exportReport();
+                                dirty = true;
+                            } else if (key == 'a' or key == 'A') {
+                                self.setFilter(.all);
+                                dirty = true;
+                            } else if (key == 'n' or key == 'N') {
+                                self.setFilter(.network);
+                                dirty = true;
+                            } else if (key == 'd' or key == 'D') {
+                                self.setFilter(.driver);
+                                dirty = true;
+                            } else if (key == 'm' or key == 'M') {
+                                self.setFilter(.missing);
+                                dirty = true;
+                            } else if (key == 's' or key == 'S') {
+                                self.setFilter(.storage);
+                                dirty = true;
+                            } else if (key == 'p' or key == 'P') {
+                                self.setFilter(.protocol);
+                                dirty = true;
+                            } else if (self.handleListKey(key)) {
+                                dirty = true;
+                            } else if (key == '1') {
+                                self.network_tab = network_tab_adapter;
+                                dirty = true;
+                            } else if (key == '2') {
+                                self.network_tab = network_tab_protocols;
+                                dirty = true;
+                            } else if (key == '3') {
+                                self.network_tab = network_tab_tcp;
+                                dirty = true;
+                            } else if (self.handleNetworkTabKey(key)) {
+                                dirty = true;
+                            }
+                        },
+                        .mouse_down => {
+                            if (self.exportButtonHit(event.x, event.y)) {
+                                _ = self.exportReport();
+                                dirty = true;
+                            } else if (self.filterAt(event.x, event.y)) |filter| {
+                                self.setFilter(filter);
+                                dirty = true;
+                            } else if (self.networkTabAt(event.x, event.y)) |tab| {
+                                self.network_tab = tab;
+                                dirty = true;
+                            } else if (self.scrollListAt(event.x, event.y)) {
+                                dirty = true;
+                            } else if (self.indexAt(event.x, event.y)) |idx| {
+                                self.selected_index = idx;
+                                dirty = true;
+                            }
+                        },
+                        else => {},
+                    }
+                },
+                .failure => |raw| return raw,
+                .timed_out => {},
             }
             if (dirty) self.render();
-            self.ctx.sys.sleepTicks(3);
         }
         return 0;
     }
