@@ -39,6 +39,9 @@ const network_tab_tcp: u8 = 2;
 const filter_button_w = 64;
 const filter_button_h = 20;
 const detail_line_h = 18;
+fn isGraphics(rec: r4os.abi.DeviceInventoryRecord) bool {
+    return rec.bus == 5 or (rec.flags & 1 != 0 and rec.class_code == 3);
+}
 
 const device_palette = r4os.gui.Palette{
     .text = text,
@@ -129,7 +132,8 @@ const App = struct {
         var events = r4os.EventLoop.init(self.ctx.sys, self.ctx.desk, &.{});
         while (!self.ctx.sys.programShouldClose()) {
             var dirty = false;
-            switch (events.wait(r4os.time_contract.timeoutForever())) {
+            const telemetry_visible = self.visible_count != 0 and isGraphics(self.records[self.selected_index]);
+            switch (events.wait(if (telemetry_visible) r4os.time_contract.timeoutFinite(.{ .nanoseconds = 1_000_000_000 }) else r4os.time_contract.timeoutForever())) {
                 .message => |message| {
                     const event = message.guiEvent() orelse continue;
                     const kind: r4os.abi.GuiEventKind = @enumFromInt(event.kind);
@@ -203,7 +207,7 @@ const App = struct {
                     }
                 },
                 .failure => |raw| return raw,
-                .timed_out => {},
+                .timed_out => dirty = telemetry_visible,
             }
             if (dirty) self.render();
         }
@@ -211,8 +215,8 @@ const App = struct {
     }
 
     fn updateMetrics(self: *App, info: r4os.abi.GuiWindowInfo) void {
-        self.w = clamp(info.client_w, 420, 1600);
-        self.h = clamp(info.client_h, 280, 1000);
+        self.w = @max(info.client_w, 420);
+        self.h = @max(info.client_h, 280);
     }
 
     fn refresh(self: *App) void {
@@ -279,6 +283,12 @@ const App = struct {
                 self.ctx.sys.write(note);
             }
             self.ctx.sys.write("\r\n");
+            if (isGraphics(self.records[i])) {
+                var detail_buf: [2048]u8 = @splat(0);
+                var writer: Writer = .{ .out = &detail_buf };
+                self.writeGraphicsReport(&writer, self.records[i]);
+                self.ctx.sys.write(writer.slice());
+            }
             if (self.records[i].bus == bus_network) {
                 var detail_buf: [4096]u8 = .{0} ** 4096;
                 var w = Writer{ .out = detail_buf[0..] };
@@ -637,6 +647,10 @@ const App = struct {
         const rec = self.records[self.selected_index];
         var line: [128]u8 = .{0} ** 128;
         _ = canvas.label(.{ .rect = .{ .x = inner.x, .y = inner.y, .w = inner.w, .h = 16 }, .text = zSlice(rec.name[0..]), .fg = text, .bg = bg, .palette = device_palette }, scratch);
+        if (isGraphics(rec)) {
+            self.drawGraphicsDetails(canvas, scratch, rec);
+            return;
+        }
         makeField(line[0..], "Group", bindingName(rec.binding));
         self.drawDetailLine(canvas, scratch, inner.y + 24, zSlice(line[0..]), text);
         makeField(line[0..], "Bus", busName(rec.bus));
@@ -658,6 +672,39 @@ const App = struct {
         } else {
             self.drawDetailLine(canvas, scratch, inner.y + 140, zSlice(rec.note[0..]), muted);
         }
+    }
+
+    fn graphicsTelemetry(self: *App, rec: r4os.abi.DeviceInventoryRecord) r4os.abi.GfxTelemetryState {
+        var state: r4os.abi.GfxTelemetryState = .{};
+        if (rec.flags & 1 == 0) return state;
+        const adapter = 0x01000000 | (@as(u32, rec.bus_no) << 8) | (@as(u32, rec.device_no) << 3) | rec.function_no;
+        _ = r4os.gfx_telemetry.forAdapter(&self.ctx.draw, adapter, r4os.abi.gfx_telemetry_metric_mask, &state);
+        return state;
+    }
+    fn drawGraphicsDetails(self: *App, canvas: r4os.gui.Canvas, scratch: []u8, rec: r4os.abi.DeviceInventoryRecord) void {
+        const inner = self.detailsInnerRect();
+        var line: [144]u8 = undefined;
+        makeField(&line, "Driver", nonEmpty(zSlice(&rec.driver)));
+        self.drawDetailLine(canvas, scratch, inner.y + 24, zSlice(&line), text);
+        const state = self.graphicsTelemetry(rec);
+        makeField(&line, "Policy", if (state.source == 0) "unknown" else r4os.gfx_telemetry.policyName(state.policy));
+        self.drawDetailLine(canvas, scratch, inner.y + 42, zSlice(&line), muted);
+        const visible = [_]usize{0,1,2,5,6,7,10,12,13};
+        for (visible, 0..) |field, i| {
+            const y = inner.y + 62 + @as(i32, @intCast(i)) * detail_line_h;
+            if (y + detail_line_h > inner.bottom()) break;
+            self.drawDetailLine(canvas, scratch, y, r4os.gfx_telemetry.formatLine(&line, &state, field), text);
+        }
+    }
+    fn writeGraphicsReport(self: *App, writer: *Writer, rec: r4os.abi.DeviceInventoryRecord) void {
+        const state = self.graphicsTelemetry(rec);
+        writer.text("\r\n    Graphics policy: ");
+        writer.text(if (state.source == 0) "unknown" else r4os.gfx_telemetry.policyName(state.policy));
+        for (0..r4os.gfx_telemetry.fields.len) |field| {
+            var line: [144]u8 = undefined;
+            writer.text("\r\n    "); writer.text(r4os.gfx_telemetry.formatLine(&line, &state, field));
+        }
+        writer.text("\r\n    Target clocks; GPU timer intervals are not job durations.\r\n");
     }
 
     fn layout(self: *const App) Layout {
@@ -848,6 +895,7 @@ const App = struct {
                 w.text(note);
             }
             if (rec.bus == bus_network) self.writeNetworkReport(&w, i);
+            if (isGraphics(rec)) self.writeGraphicsReport(&w, rec);
             w.text("\r\n\r\n");
         }
 

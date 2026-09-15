@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.3`
+- Version: `0.1.4`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/DEVMGR.R4X`
 - Image scope: `full`
 - Canonical project manifest: `module.R4MF`
@@ -18,7 +18,7 @@ On Windows:
 
     Build.bat
 
-On Linux or macOS:
+On Linux:
 
     ./Build.sh
 
@@ -26,6 +26,15 @@ The build starters resolve the current local R4OS dependency checkouts through
 `Settings.R4S`. The URL and hash entries in `build.zig.zon` record the
 last verified standalone dependency identities; workspace builds use the
 mapped local checkouts.
+
+## GPU telemetry
+
+Selecting a graphics device refreshes its power policy, target clocks,
+temperatures, power limit and utilization once per second. Unsupported or
+stale values remain explicitly unknown. Console output and the export to
+`C:\Temp\HWREPORT.TXT` use the same data, including the GPU global timer.
+Firmware targets are distinct from measured effective clocks; timer deltas
+are sampling intervals. Collection does not generate graphics workloads.
 
 ## Documentation
 
