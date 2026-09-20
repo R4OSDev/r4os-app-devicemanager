@@ -683,20 +683,36 @@ const App = struct {
     }
     fn drawGraphicsDetails(self: *App, canvas: r4os.gui.Canvas, scratch: []u8, rec: r4os.abi.DeviceInventoryRecord) void {
         const inner = self.detailsInnerRect();
-        var line: [144]u8 = undefined;
-        makeField(&line, "Driver", nonEmpty(zSlice(&rec.driver)));
-        self.drawDetailLine(canvas, scratch, inner.y + 24, zSlice(&line), text);
+        var line: [224]u8 = undefined;
+        var y = inner.y + 24;
+        if (r4os.graphics_status.Snapshot.read(&self.ctx.dev)) |current| {
+            if (rec.bus == 5 or current.matchesAdapter(rec)) {
+                for (0..8) |field| {
+                    if (y + detail_line_h > inner.bottom()) break;
+                    self.drawDetailLine(canvas, scratch, y, current.line(&line, field), text);
+                    y += detail_line_h;
+                }
+            } else {
+                self.drawDetailLine(canvas, scratch, y, "Not the active output adapter", muted); y += detail_line_h;
+            }
+        } else {
+            self.drawDetailLine(canvas, scratch, y, "Current graphics state unavailable", muted); y += detail_line_h;
+        }
         const state = self.graphicsTelemetry(rec);
-        makeField(&line, "Policy", if (state.source == 0) "unknown" else r4os.gfx_telemetry.policyName(state.policy));
-        self.drawDetailLine(canvas, scratch, inner.y + 42, zSlice(&line), muted);
         const visible = [_]usize{0,1,2,5,6,7,10,12,13};
-        for (visible, 0..) |field, i| {
-            const y = inner.y + 62 + @as(i32, @intCast(i)) * detail_line_h;
+        for (visible) |field| {
             if (y + detail_line_h > inner.bottom()) break;
             self.drawDetailLine(canvas, scratch, y, r4os.gfx_telemetry.formatLine(&line, &state, field), text);
+            y += detail_line_h;
         }
     }
     fn writeGraphicsReport(self: *App, writer: *Writer, rec: r4os.abi.DeviceInventoryRecord) void {
+        if (r4os.graphics_status.Snapshot.read(&self.ctx.dev)) |current| {
+            if (rec.bus == 5 or current.matchesAdapter(rec)) {
+                var line: [224]u8 = undefined;
+                for (0..8) |field| { writer.text("\r\n    "); writer.text(current.line(&line, field)); }
+            } else writer.text("\r\n    Not the active output adapter");
+        } else writer.text("\r\n    Current graphics state unavailable");
         const state = self.graphicsTelemetry(rec);
         writer.text("\r\n    Graphics policy: ");
         writer.text(if (state.source == 0) "unknown" else r4os.gfx_telemetry.policyName(state.policy));

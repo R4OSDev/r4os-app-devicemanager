@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.4`
+- Version: `0.1.5`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/DEVMGR.R4X`
 - Image scope: `full`
 - Canonical project manifest: `module.R4MF`
@@ -47,3 +47,10 @@ Detailed German technical notes from the migration are preserved in
 Original R4OS material is licensed under Apache License 2.0. See `LICENSE`
 and `NOTICE`. Any repository-specific external material is documented in
 `THIRD_PARTY_NOTICES.md`.
+
+Graphics details (0.79.42)
+-------------------------
+The active display record and its exact PCI adapter show the coherent output
+state, resident driver version, declared firmware bundle and fallback reason.
+Other adapters are explicitly identified as inactive. DISPLAYD /STATE exposes
+the same projection. Installed files are never used to invent a loaded version.
