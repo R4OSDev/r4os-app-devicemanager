@@ -720,7 +720,7 @@ const App = struct {
             var line: [144]u8 = undefined;
             writer.text("\r\n    "); writer.text(r4os.gfx_telemetry.formatLine(&line, &state, field));
         }
-        writer.text("\r\n    Target clocks; GPU timer intervals are not job durations.\r\n");
+        writer.text("\r\n    Targets are requests; clocks are queried. Fabric is not DRAM. GPU timer intervals are not job durations.\r\n");
     }
 
     fn layout(self: *const App) Layout {
