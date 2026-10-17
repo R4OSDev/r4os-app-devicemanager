@@ -693,13 +693,15 @@ const App = struct {
                     y += detail_line_h;
                 }
             } else {
-                self.drawDetailLine(canvas, scratch, y, "Not the active output adapter", muted); y += detail_line_h;
+                self.drawDetailLine(canvas, scratch, y, "Not the active output adapter", muted);
+                y += detail_line_h;
             }
         } else {
-            self.drawDetailLine(canvas, scratch, y, "Current graphics state unavailable", muted); y += detail_line_h;
+            self.drawDetailLine(canvas, scratch, y, "Current graphics state unavailable", muted);
+            y += detail_line_h;
         }
         const state = self.graphicsTelemetry(rec);
-        const visible = [_]usize{0,1,2,5,6,7,10,12,13};
+        const visible = [_]usize{ 0, 1, 2, 5, 6, 7, 10, 12, 13 };
         for (visible) |field| {
             if (y + detail_line_h > inner.bottom()) break;
             self.drawDetailLine(canvas, scratch, y, r4os.gfx_telemetry.formatLine(&line, &state, field), text);
@@ -710,7 +712,10 @@ const App = struct {
         if (r4os.graphics_status.Snapshot.read(&self.ctx.dev)) |current| {
             if (rec.bus == 5 or current.matchesAdapter(rec)) {
                 var line: [224]u8 = undefined;
-                for (0..8) |field| { writer.text("\r\n    "); writer.text(current.line(&line, field)); }
+                for (0..8) |field| {
+                    writer.text("\r\n    ");
+                    writer.text(current.line(&line, field));
+                }
             } else writer.text("\r\n    Not the active output adapter");
         } else writer.text("\r\n    Current graphics state unavailable");
         const state = self.graphicsTelemetry(rec);
@@ -718,7 +723,8 @@ const App = struct {
         writer.text(if (state.source == 0) "unknown" else r4os.gfx_telemetry.policyName(state.policy));
         for (0..r4os.gfx_telemetry.fields.len) |field| {
             var line: [144]u8 = undefined;
-            writer.text("\r\n    "); writer.text(r4os.gfx_telemetry.formatLine(&line, &state, field));
+            writer.text("\r\n    ");
+            writer.text(r4os.gfx_telemetry.formatLine(&line, &state, field));
         }
         writer.text("\r\n    Targets are requests; clocks are queried. Fabric is not DRAM. GPU timer intervals are not job durations.\r\n");
     }
@@ -1110,8 +1116,6 @@ const App = struct {
         writeRuntime(w, detail.protocols[r4os.abi.net_detail_protocol_dns]);
         w.text(" tcp=");
         writeRuntime(w, detail.protocols[r4os.abi.net_detail_protocol_tcp]);
-        w.text(" r4sl=");
-        writeRuntime(w, detail.protocols[r4os.abi.net_detail_protocol_serial_link]);
         self.writeIpcReport(w);
         w.text("\r\n    arp cache=");
         if ((detail.flags & r4os.abi.net_detail_flag_arp_cache_valid) != 0) {
@@ -1603,8 +1607,6 @@ fn makeProtocolLine(out: []u8, detail: r4os.abi.NetDetailSnapshot) void {
     b.text(runtimeSource(detail.protocols[r4os.abi.net_detail_protocol_dns]));
     b.text(" tcp=");
     b.text(runtimeSource(detail.protocols[r4os.abi.net_detail_protocol_tcp]));
-    b.text(" r4sl=");
-    b.text(runtimeSource(detail.protocols[r4os.abi.net_detail_protocol_serial_link]));
     b.text(" fail=");
     b.num64(protocolFailures(detail));
     b.text(" req=");
@@ -1759,14 +1761,14 @@ fn lastProtocolError(detail: r4os.abi.NetDetailSnapshot) []const u8 {
 fn protocolFailures(detail: r4os.abi.NetDetailSnapshot) u64 {
     var total: u64 = 0;
     var i: usize = 0;
-    while (i < detail.protocols.len) : (i += 1) total += detail.protocols[i].dispatch_failures;
+    while (i <= r4os.abi.net_detail_protocol_tcp) : (i += 1) total += detail.protocols[i].dispatch_failures;
     return total;
 }
 
 fn protocolRequiredCount(detail: r4os.abi.NetDetailSnapshot) u64 {
     var total: u64 = 0;
     var i: usize = 0;
-    while (i < detail.protocols.len) : (i += 1) {
+    while (i <= r4os.abi.net_detail_protocol_tcp) : (i += 1) {
         if (detail.protocols[i].builtin_fallback == 0 and
             detail.protocols[i].fallback_policy == r4os.abi.net_detail_fallback_policy_none and
             detail.protocols[i].fallback_decision == r4os.abi.net_detail_fallback_decision_none)
