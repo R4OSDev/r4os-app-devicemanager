@@ -1,13 +1,16 @@
 const r4os = @import("r4os");
+const std = @import("std");
 const AppApi = struct {
+    app: *const r4os.App2,
     sys: r4os.r4sys.Context,
     desk: r4os.r4desk.Context,
     draw: r4os.r4draw.Context,
     net: r4os.r4net.Context,
     dev: r4os.r4dev.Context,
 
-    fn init(r4_app: *r4os.App) ?AppApi {
+    fn init(r4_app: *r4os.App2) ?AppApi {
         return .{
+            .app = r4_app,
             .sys = r4_app.system(),
             .desk = r4_app.desktop() orelse return null,
             .draw = r4_app.drawing() orelse return null,
@@ -26,7 +29,47 @@ const text: u32 = 0x000000;
 const text_inv: u32 = 0xFFFFFF;
 const muted: u32 = 0x606060;
 
-const max_records = 128;
+const RowText = struct {
+    name: [48]u8 = @splat(0),
+    group: [18]u8 = @splat(0),
+    bus: [18]u8 = @splat(0),
+    status: [28]u8 = @splat(0),
+};
+
+test "device inventory view retains rows beyond128 and reports bounded writer exhaustion" {
+    var records: [160]r4os.abi.DeviceInventoryRecord = @splat(.{});
+    var indices: [160]usize = undefined;
+    var row_text: [160]RowText = undefined;
+    var cells: [160 * 4][]const u8 = undefined;
+    for (&records, 0..) |*record, i| record.bus = if (i % 2 == 0) bus_network else bus_storage;
+    var app = App{
+        .ctx = undefined,
+        .records = &records,
+        .count = records.len,
+        .visible_indices = &indices,
+        .row_text = &row_text,
+        .cells = &cells,
+        .snapshot_valid = true,
+    };
+    app.sortRecords();
+    app.applyFilter();
+    try std.testing.expectEqual(@as(usize, 160), app.visible_count);
+    try std.testing.expectEqual(@as(usize, 159), app.visible_indices[159]);
+    app.selected_index = 159;
+    app.ensureVisible();
+    try std.testing.expect(app.first_visible > 128);
+    app.setFilter(.network);
+    try std.testing.expectEqual(@as(usize, 80), app.visible_count);
+    for (app.visible_indices[0..app.visible_count]) |index| try std.testing.expectEqual(bus_network, app.records[index].bus);
+    app.count = 0;
+    app.applyFilter();
+    try std.testing.expectEqual(@as(usize, 0), app.visible_count);
+    var bytes: [5]u8 = undefined;
+    var writer = Writer{ .out = &bytes };
+    writer.text("abcdef");
+    try std.testing.expect(writer.truncated);
+    try std.testing.expectEqualStrings("abcd", writer.slice());
+}
 const export_report_size = 16 * 1024;
 const row_h = 18;
 const bus_storage: u8 = 4;
@@ -75,7 +118,7 @@ const Layout = struct {
     details: r4os.gui.Rect,
 };
 
-pub fn r4_app_main(r4_app: *r4os.App) i32 {
+pub fn r4_app_main(r4_app: *r4os.App2) i32 {
     var ctx = AppApi.init(r4_app) orelse return r4os.abi.err_no_group;
     var app = App{ .ctx = &ctx };
     return app.run();
@@ -86,8 +129,14 @@ const App = struct {
     w: i32 = 640,
     h: i32 = 420,
     summary: r4os.abi.DeviceInventorySummary = .{},
-    records: [max_records]r4os.abi.DeviceInventoryRecord = .{r4os.abi.DeviceInventoryRecord{}} ** max_records,
-    visible_indices: [max_records]usize = .{0} ** max_records,
+    records: []r4os.abi.DeviceInventoryRecord = &.{},
+    visible_indices: []usize = &.{},
+    row_text: []RowText = &.{},
+    cells: [][]const u8 = &.{},
+    snapshot_valid: bool = false,
+    snapshot_generation: u64 = 0,
+    snapshot_error: ?i32 = null,
+    saver: r4os.document_save.Saver = .{},
     count: usize = 0,
     visible_count: usize = 0,
     selected_index: usize = 0,
@@ -97,26 +146,40 @@ const App = struct {
     status: [64]u8 = .{0} ** 64,
 
     fn run(self: *App) i32 {
-        const args = trim(zPtrSlice(self.ctx.sys.argsRaw()));
+        defer self.deinitRows();
+        const args = trim(self.ctx.app.args());
         if (equalsIgnoreCase(args, "/NETDETAIL") or equalsIgnoreCase(args, "NETDETAIL")) {
             self.ctx.sys.println("Device Manager");
             self.refresh();
+            if (!self.snapshot_valid) {
+                self.ctx.sys.println(zSlice(&self.status));
+                return 1;
+            }
             return self.printNetworkDetailSelftest();
         }
         if (equalsIgnoreCase(args, "/STORAGE") or equalsIgnoreCase(args, "STORAGE")) {
             self.ctx.sys.println("Device Manager");
             self.refresh();
+            if (!self.snapshot_valid) {
+                self.ctx.sys.println(zSlice(&self.status));
+                return 1;
+            }
             return self.printStorageSelftest();
         }
 
         if (self.ctx.desk.programWindowId() < 0) {
             self.ctx.sys.println("Device Manager");
             self.refresh();
+            if (!self.snapshot_valid) {
+                self.ctx.sys.println(zSlice(&self.status));
+                return 1;
+            }
             self.printConsole();
             if (self.exportReport()) {
                 self.ctx.sys.println("Exported C:\\Temp\\HWREPORT.TXT");
             } else {
                 self.ctx.sys.println("Export failed");
+                return 1;
             }
             return 0;
         }
@@ -139,13 +202,13 @@ const App = struct {
                     const kind: r4os.abi.GuiEventKind = @enumFromInt(event.kind);
                     switch (kind) {
                         .close => return 0,
-                        .resize => {
+                        .resize, .font_changed => {
                             _ = self.ctx.desk.guiWindowInfo(&info);
                             self.updateMetrics(info);
                             dirty = true;
                         },
                         .key_down => {
-                            const key: u8 = @intCast(event.key & 0xFF);
+                            const key: u8 = if (event.key <= 0xff) @intCast(event.key) else 0;
                             if (key == r4os.gui.Key.escape) return 0;
                             if (key == 'r' or key == 'R') {
                                 self.refresh();
@@ -219,17 +282,72 @@ const App = struct {
         self.h = @max(info.client_h, 280);
     }
 
+    fn deinitRows(self: *App) void {
+        const allocator = self.ctx.sys.allocator();
+        allocator.free(self.records);
+        allocator.free(self.visible_indices);
+        allocator.free(self.row_text);
+        allocator.free(self.cells);
+        self.records = &.{};
+        self.visible_indices = &.{};
+        self.row_text = &.{};
+        self.cells = &.{};
+        self.snapshot_valid = false;
+    }
+
+    fn captureRows(self: *App) !void {
+        const provider = try self.ctx.app.deviceSnapshotProvider();
+        var sizing = try r4os.device_snapshot.Snapshot.init(.{}, 0, provider);
+        defer _ = sizing.close() catch {};
+        const needed = try sizing.capture(false);
+        self.snapshot_error = needed.error_code;
+        if (needed.status != @intFromEnum(r4os.device_snapshot.Status.capacity) and
+            needed.status != @intFromEnum(r4os.device_snapshot.Status.complete)) return snapshotFailure(needed);
+        self.snapshot_error = null;
+        const allocator = self.ctx.sys.allocator();
+        const records = try allocator.alloc(r4os.abi.DeviceInventoryRecord, needed.info.required_count);
+        errdefer allocator.free(records);
+        const bytes = std.mem.sliceAsBytes(records);
+        var snapshot = try r4os.device_snapshot.Snapshot.init(.{ .address = @intFromPtr(bytes.ptr), .length = bytes.len }, @intCast(records.len), provider);
+        defer _ = snapshot.close() catch {};
+        const progress = try snapshot.capture(false);
+        self.snapshot_error = progress.error_code;
+        if (progress.status != @intFromEnum(r4os.device_snapshot.Status.complete)) return snapshotFailure(progress);
+        self.snapshot_error = null;
+        const indices = try allocator.alloc(usize, progress.info.count);
+        errdefer allocator.free(indices);
+        const row_text = try allocator.alloc(RowText, progress.info.count);
+        errdefer allocator.free(row_text);
+        const cells = try allocator.alloc([]const u8, @as(usize, progress.info.count) * 4);
+        self.deinitRows();
+        self.records = records;
+        self.visible_indices = indices;
+        self.row_text = row_text;
+        self.cells = cells;
+        self.count = progress.info.count;
+        self.summary = .{ .total = progress.info.count, .with_driver = progress.info.with_driver, .without_driver = progress.info.without_driver, .unknown = progress.info.unknown };
+        self.snapshot_generation = progress.info.snapshot_generation;
+        self.snapshot_valid = true;
+    }
+
     fn refresh(self: *App) void {
-        self.summary = .{};
-        _ = self.ctx.dev.deviceInventorySummary(&self.summary);
-        self.count = 0;
-        var i: u32 = 0;
-        while (i < self.summary.total and self.count < self.records.len) : (i += 1) {
-            var rec: r4os.abi.DeviceInventoryRecord = .{};
-            if (self.ctx.dev.deviceInventoryRecord(i, &rec) <= 0) break;
-            self.records[self.count] = rec;
-            self.count += 1;
-        }
+        self.snapshot_error = null;
+        self.captureRows() catch |err| {
+            self.snapshot_valid = false;
+            self.summary = .{};
+            self.count = 0;
+            self.visible_count = 0;
+            self.selected_index = 0;
+            self.first_visible = 0;
+            var message: [64]u8 = undefined;
+            const formatted = if (self.snapshot_error) |code|
+                std.fmt.bufPrint(&message, "Snapshot {s} ({d})", .{ @errorName(err), code }) catch "Device snapshot failed"
+            else
+                std.fmt.bufPrint(&message, "Snapshot {s}", .{@errorName(err)}) catch "Device snapshot failed";
+            self.setStatus(formatted);
+            return;
+        };
+        self.setStatus("Passive device snapshot captured.");
         self.sortRecords();
         self.applyFilter();
         if (self.count == 0) {
@@ -580,7 +698,7 @@ const App = struct {
         const rect = self.layout().summary;
         _ = canvas.rect(rect, panel);
         _ = canvas.rect(.{ .x = rect.x, .y = rect.bottom() - 1, .w = rect.w, .h = 1 }, panel_dark);
-        makeSummary(buf[0..], self.summary);
+        if (self.snapshot_valid) makeSummary(buf[0..], self.summary) else copyBytes(&buf, "Device snapshot unavailable");
         _ = canvas.label(.{ .rect = rect.inset(8, 4), .text = zSlice(buf[0..]), .fg = text, .bg = panel, .palette = device_palette }, scratch);
         const status_text = zSlice(self.status[0..]);
         if (status_text.len > 0) _ = canvas.label(.{ .rect = .{ .x = rect.x + 8, .y = rect.bottom() + 1, .w = rect.w - 16, .h = 14 }, .text = status_text, .fg = muted, .bg = bg, .palette = device_palette }, scratch);
@@ -602,30 +720,24 @@ const App = struct {
             .{ .title = copyLit(title_bus[0..], "Bus"), .width = 72, .alignment = .left },
             .{ .title = copyLit(title_status[0..], "Status"), .width = 92, .alignment = .left },
         };
-        var cells: [max_records * 4][]const u8 = undefined;
-        var names: [max_records][48]u8 = .{.{0} ** 48} ** max_records;
-        var groups: [max_records][18]u8 = .{.{0} ** 18} ** max_records;
-        var buses: [max_records][18]u8 = .{.{0} ** 18} ** max_records;
-        var statuses: [max_records][28]u8 = .{.{0} ** 28} ** max_records;
-
         var row: usize = 0;
         while (row < self.visible_count) : (row += 1) {
             const rec = self.records[self.visible_indices[row]];
-            copyBytes(names[row][0..], zSlice(rec.name[0..]));
-            copyBytes(groups[row][0..], bindingName(rec.binding));
-            copyBytes(buses[row][0..], busName(rec.bus));
-            copyBytes(statuses[row][0..], nonEmpty(zSlice(rec.status[0..])));
+            copyBytes(self.row_text[row].name[0..], zSlice(rec.name[0..]));
+            copyBytes(self.row_text[row].group[0..], bindingName(rec.binding));
+            copyBytes(self.row_text[row].bus[0..], busName(rec.bus));
+            copyBytes(self.row_text[row].status[0..], nonEmpty(zSlice(rec.status[0..])));
             const base = row * 4;
-            cells[base] = zSlice(names[row][0..]);
-            cells[base + 1] = zSlice(groups[row][0..]);
-            cells[base + 2] = zSlice(buses[row][0..]);
-            cells[base + 3] = zSlice(statuses[row][0..]);
+            self.cells[base] = zSlice(self.row_text[row].name[0..]);
+            self.cells[base + 1] = zSlice(self.row_text[row].group[0..]);
+            self.cells[base + 2] = zSlice(self.row_text[row].bus[0..]);
+            self.cells[base + 3] = zSlice(self.row_text[row].status[0..]);
         }
 
         _ = canvas.tableView(.{
             .rect = self.listRect(),
             .columns = columns[0..],
-            .cells = cells[0 .. self.visible_count * 4],
+            .cells = self.cells[0 .. self.visible_count * 4],
             .row_count = self.visible_count,
             .selected_index = self.selectedVisiblePosition() orelse 0,
             .first_index = self.first_visible,
@@ -866,8 +978,17 @@ const App = struct {
     }
 
     fn exportReport(self: *App) bool {
-        var report: [export_report_size]u8 = .{0} ** export_report_size;
-        var w = Writer{ .out = report[0..] };
+        if (!self.snapshot_valid) {
+            self.setStatus("Export failed: device snapshot unavailable.");
+            return false;
+        }
+        const allocator = self.ctx.sys.allocator();
+        const report = allocator.alloc(u8, export_report_size + self.count * 4096) catch {
+            self.setStatus("Export failed: not enough memory.");
+            return false;
+        };
+        defer allocator.free(report);
+        var w = Writer{ .out = report };
         w.text("R4OS hardware report\r\n");
         w.text("====================\r\n\r\n");
         w.text("Summary: total=");
@@ -921,15 +1042,18 @@ const App = struct {
             w.text("\r\n\r\n");
         }
 
-        const data = w.slice();
-        const written = self.ctx.sys.fileWrite(export_path, data);
-        const ok_written = written == @as(i32, @intCast(data.len));
-        if (ok_written and w.truncated) {
-            self.setStatus("Exported C:\\Temp\\HWREPORT.TXT (truncated)");
-        } else {
-            self.setStatus(if (ok_written) "Exported C:\\Temp\\HWREPORT.TXT" else "Export failed");
+        if (w.truncated) {
+            self.setStatus("Export failed: report exceeds buffer.");
+            return false;
         }
-        return ok_written;
+        const data = w.slice();
+        const saved = self.saver.save(.{ .sys = self.ctx.sys }, .{ .ptr = export_path, .len = export_path.len }, data, false);
+        if (!saved.committed()) {
+            self.setStatus(saved.message());
+            return false;
+        }
+        self.setStatus(if (saved == .saved_backup_retained) "Exported HWREPORT.TXT, backup retained" else "Exported C:\\Temp\\HWREPORT.TXT");
+        return true;
     }
 
     fn setStatus(self: *App, value: []const u8) void {
@@ -1975,4 +2099,14 @@ fn clamp(value: i32, min: i32, max: i32) i32 {
     if (value < min) return min;
     if (value > max) return max;
     return value;
+}
+
+fn snapshotFailure(progress: r4os.device_snapshot.Progress) anyerror {
+    return switch (@as(r4os.device_snapshot.Status, @enumFromInt(progress.status))) {
+        .no_provider => error.NoProvider,
+        .capacity => error.InventoryChanged,
+        .cancelled => error.Cancelled,
+        .invalid_provider => error.InvalidProvider,
+        else => error.DeviceSnapshotFailed,
+    };
 }
