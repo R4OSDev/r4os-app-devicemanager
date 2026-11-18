@@ -39,6 +39,7 @@ const RowText = struct {
 test "device inventory view retains rows beyond128 and reports bounded writer exhaustion" {
     var records: [160]r4os.abi.DeviceInventoryRecord = @splat(.{});
     var indices: [160]usize = undefined;
+    var order: [160]usize = undefined;
     var row_text: [160]RowText = undefined;
     var cells: [160 * 4][]const u8 = undefined;
     for (&records, 0..) |*record, i| record.bus = if (i % 2 == 0) bus_network else bus_storage;
@@ -47,6 +48,7 @@ test "device inventory view retains rows beyond128 and reports bounded writer ex
         .records = &records,
         .count = records.len,
         .visible_indices = &indices,
+        .ordered_indices = &order,
         .row_text = &row_text,
         .cells = &cells,
         .snapshot_valid = true,
@@ -54,8 +56,9 @@ test "device inventory view retains rows beyond128 and reports bounded writer ex
     app.sortRecords();
     app.applyFilter();
     try std.testing.expectEqual(@as(usize, 160), app.visible_count);
-    try std.testing.expectEqual(@as(usize, 159), app.visible_indices[159]);
-    app.selected_index = 159;
+    try std.testing.expectEqual(@as(usize, 158), app.visible_indices[159]);
+    for (&records, 0..) |record, index| try std.testing.expectEqual(if (index % 2 == 0) bus_network else bus_storage, record.bus);
+    app.selected_index = app.visible_indices[159];
     app.ensureVisible();
     try std.testing.expect(app.first_visible > 128);
     app.setFilter(.network);
@@ -130,6 +133,7 @@ const App = struct {
     h: i32 = 420,
     summary: r4os.abi.DeviceInventorySummary = .{},
     records: []r4os.abi.DeviceInventoryRecord = &.{},
+    ordered_indices: []usize = &.{},
     visible_indices: []usize = &.{},
     row_text: []RowText = &.{},
     cells: [][]const u8 = &.{},
@@ -285,10 +289,12 @@ const App = struct {
     fn deinitRows(self: *App) void {
         const allocator = self.ctx.sys.allocator();
         allocator.free(self.records);
+        allocator.free(self.ordered_indices);
         allocator.free(self.visible_indices);
         allocator.free(self.row_text);
         allocator.free(self.cells);
         self.records = &.{};
+        self.ordered_indices = &.{};
         self.visible_indices = &.{};
         self.row_text = &.{};
         self.cells = &.{};
@@ -314,6 +320,8 @@ const App = struct {
         self.snapshot_error = progress.error_code;
         if (progress.status != @intFromEnum(r4os.device_snapshot.Status.complete)) return snapshotFailure(progress);
         self.snapshot_error = null;
+        const order = try allocator.alloc(usize, progress.info.count);
+        errdefer allocator.free(order);
         const indices = try allocator.alloc(usize, progress.info.count);
         errdefer allocator.free(indices);
         const row_text = try allocator.alloc(RowText, progress.info.count);
@@ -321,6 +329,7 @@ const App = struct {
         const cells = try allocator.alloc([]const u8, @as(usize, progress.info.count) * 4);
         self.deinitRows();
         self.records = records;
+        self.ordered_indices = order;
         self.visible_indices = indices;
         self.row_text = row_text;
         self.cells = cells;
@@ -331,6 +340,7 @@ const App = struct {
     }
 
     fn refresh(self: *App) void {
+        const previous = if (self.snapshot_valid and self.selected_index < self.count) self.records[self.selected_index] else null;
         self.snapshot_error = null;
         self.captureRows() catch |err| {
             self.snapshot_valid = false;
@@ -349,12 +359,30 @@ const App = struct {
         };
         self.setStatus("Passive device snapshot captured.");
         self.sortRecords();
+        self.selectAfterRefresh(previous);
         self.applyFilter();
         if (self.count == 0) {
             self.selected_index = 0;
             self.first_visible = 0;
         } else if (self.selected_index >= self.count) self.selected_index = self.count - 1;
         self.ensureVisible();
+    }
+
+    fn selectAfterRefresh(self: *App, previous: ?r4os.abi.DeviceInventoryRecord) void {
+        if (self.count == 0) return;
+        if (previous) |old| {
+            for (self.ordered_indices[0..self.count]) |index| {
+                const record = &self.records[index];
+                if (record.bus == old.bus and record.bus_no == old.bus_no and
+                    record.device_no == old.device_no and record.function_no == old.function_no and
+                    record.vendor_id == old.vendor_id and record.device_id == old.device_id and
+                    std.mem.eql(u8, &record.name, &old.name)) {
+                    self.selected_index = index;
+                    return;
+                }
+            }
+        }
+        self.selected_index = self.ordered_indices[0];
     }
 
     fn printConsole(self: *App) void {
@@ -370,8 +398,7 @@ const App = struct {
         self.ctx.sys.write(bindingName(binding));
         self.ctx.sys.write(":\r\n");
         var found = false;
-        var i: usize = 0;
-        while (i < self.count) : (i += 1) {
+        for (self.ordered_indices[0..self.count]) |i| {
             if (self.records[i].binding != binding) continue;
             found = true;
             self.ctx.sys.write("  ");
@@ -421,15 +448,13 @@ const App = struct {
     }
 
     fn sortRecords(self: *App) void {
-        var i: usize = 1;
-        while (i < self.count) : (i += 1) {
-            const rec = self.records[i];
-            var j = i;
-            while (j > 0 and recordSortKey(rec) < recordSortKey(self.records[j - 1])) : (j -= 1) {
-                self.records[j] = self.records[j - 1];
+        const indices = self.ordered_indices[0..self.count];
+        for (indices, 0..) |*index, i| index.* = i;
+        std.mem.sort(usize, indices, self.records, struct {
+            fn less(records: []const r4os.abi.DeviceInventoryRecord, a: usize, b: usize) bool {
+                return recordSortKey(&records[a]) < recordSortKey(&records[b]);
             }
-            self.records[j] = rec;
-        }
+        }.less);
     }
 
     fn printNetworkDetailSelftest(self: *App) i32 {
@@ -503,8 +528,7 @@ const App = struct {
         var mounted_c: u32 = 0;
         var builtin_blocks: u32 = 0;
 
-        var i: usize = 0;
-        while (i < self.count) : (i += 1) {
+        for (self.ordered_indices[0..self.count]) |i| {
             const rec = self.records[i];
             if (rec.bus != bus_storage) continue;
             const is_block = !equalsIgnoreCase(zSlice(rec.driver[0..]), "storage/block");
@@ -555,8 +579,7 @@ const App = struct {
     }
 
     fn printNetworkBackendMappingSelftest(self: *App) void {
-        var i: usize = 0;
-        while (i < self.count) : (i += 1) {
+        for (self.ordered_indices[0..self.count]) |i| {
             if (self.records[i].bus == bus_network or !isNetworkRelated(self.records[i])) continue;
             if (self.networkDetailRecordIndex(i)) |_| {
                 self.ctx.sys.println("network backend map: ok");
@@ -573,8 +596,7 @@ const App = struct {
     }
 
     fn firstNetworkRecord(self: *const App) ?usize {
-        var i: usize = 0;
-        while (i < self.count) : (i += 1) {
+        for (self.ordered_indices[0..self.count]) |i| {
             if (self.records[i].bus == bus_network and self.records[i].binding == 0) return i;
         }
         return null;
@@ -644,8 +666,7 @@ const App = struct {
 
     fn applyFilter(self: *App) void {
         self.visible_count = 0;
-        var i: usize = 0;
-        while (i < self.count and self.visible_count < self.visible_indices.len) : (i += 1) {
+        for (self.ordered_indices[0..self.count]) |i| {
             if (!recordMatchesFilter(self.records[i], self.filter)) continue;
             self.visible_indices[self.visible_count] = i;
             self.visible_count += 1;
@@ -1001,8 +1022,7 @@ const App = struct {
         w.num(self.summary.unknown);
         w.text("\r\n\r\n");
 
-        var i: usize = 0;
-        while (i < self.count) : (i += 1) {
+        for (self.ordered_indices[0..self.count]) |i| {
             const rec = self.records[i];
             w.text(bindingName(rec.binding));
             w.text("\r\n");
@@ -1448,8 +1468,7 @@ const App = struct {
         if (rec.bus == bus_network and rec.binding == 0) return record_index;
         if (!isNetworkRelated(rec)) return null;
 
-        var i: usize = 0;
-        while (i < self.count) : (i += 1) {
+        for (self.ordered_indices[0..self.count]) |i| {
             const candidate = self.records[i];
             if (candidate.bus != bus_network or candidate.binding != 0) continue;
             if (samePciDevice(rec, candidate)) return i;
@@ -2001,7 +2020,7 @@ const Writer = struct {
     }
 };
 
-fn recordSortKey(rec: r4os.abi.DeviceInventoryRecord) u16 {
+fn recordSortKey(rec: *const r4os.abi.DeviceInventoryRecord) u16 {
     return @as(u16, rec.binding) * 256 + rec.bus;
 }
 
@@ -2109,4 +2128,27 @@ fn snapshotFailure(progress: r4os.device_snapshot.Progress) anyerror {
         .invalid_provider => error.InvalidProvider,
         else => error.DeviceSnapshotFailed,
     };
+}
+
+test "device ordering remains stable across snapshot refresh and filters" {
+    var records: [5]r4os.abi.DeviceInventoryRecord = @splat(.{});
+    for (&records, [_]u8{bus_network,bus_storage,bus_network,bus_storage,bus_network}, 0..) |*r,b,i| {
+        r.bus=b; r.device_id=@intCast(i+10); r.name[0]=@intCast('A'+i);
+    }
+    records[0].binding=1;
+    var order:[5]usize=undefined;
+    var visible:[5]usize=undefined;
+    var app=App{.ctx=undefined,.records=&records,.ordered_indices=&order,.visible_indices=&visible,.count=5};
+    app.sortRecords();
+    try std.testing.expectEqualSlices(usize,&.{1,3,2,4,0},&order);
+    const old=records[2];
+    std.mem.swap(r4os.abi.DeviceInventoryRecord,&records[2],&records[4]);
+    app.sortRecords(); app.selectAfterRefresh(old); app.setFilter(.network);
+    try std.testing.expectEqualSlices(usize,&.{2,4,0},visible[0..app.visible_count]);
+    try std.testing.expectEqual(@as(usize,4),app.selected_index);
+    try std.testing.expectEqual(old.device_id,app.records[app.selected_index].device_id);
+    try std.testing.expectEqual(@as(u32,1),app.networkAdapterIndex(app.selected_index));
+    for (&records,0..) |*row,i| row.bus=@intCast(i);
+    for (&records) |*row| row.binding=0;
+    app.sortRecords();try std.testing.expectEqualSlices(usize,&.{0,1,2,3,4},&order);
 }
